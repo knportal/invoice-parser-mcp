@@ -1,0 +1,669 @@
+"""
+Invoice Parser MCP Server
+Parse invoices, receipts, and financial documents using Claude Vision.
+
+Extracts structured JSON data from PDF or image files (PNG, JPG, WEBP).
+Supports batch processing, line-item extraction, math validation, and CSV export.
+
+Authentication: api_key (free/pro tier) OR payment_proof (x402 USDC on Base).
+"""
+
+import base64
+import csv
+import json
+import logging
+import mimetypes
+import os
+import sys
+from pathlib import Path
+from typing import Annotated
+
+import anthropic
+from pydantic import Field
+
+from mcp.server.fastmcp import FastMCP
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+from config import LOG_FILE, LOG_LEVEL, ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+os.makedirs(os.path.dirname(LOG_FILE) if os.path.dirname(LOG_FILE) else ".", exist_ok=True)
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+from auth import validate_and_charge  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# x402 micropayments (per-tool pricing)
+# ---------------------------------------------------------------------------
+from x402 import (  # noqa: E402
+    WALLET_ADDRESS,
+    is_proof_used,
+    mark_proof_used,
+    payment_required_response,
+    verify_payment,
+)
+
+# Pricing per tool (USDC)
+PRICE_PARSE = 0.05      # parse_invoice, parse_receipt
+PRICE_EXTRACT = 0.01    # extract_line_items, extract_totals, validate_invoice
+PRICE_EXPORT = 0.10     # export_to_csv (batch, multiple docs)
+
+# ---------------------------------------------------------------------------
+# Claude Vision client
+# ---------------------------------------------------------------------------
+_anthropic_client = None
+
+def _get_client() -> anthropic.Anthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
+# ---------------------------------------------------------------------------
+# MCP server
+# ---------------------------------------------------------------------------
+_PORT = int(os.environ.get("PORT", 8000))
+
+mcp = FastMCP(
+    "InvoiceParser",
+    instructions=(
+        "Parse invoices, receipts, and financial documents into structured JSON. "
+        "Supports PDF and image files (PNG, JPG, WEBP). "
+        "Use parse_invoice for vendor invoices, parse_receipt for retail receipts. "
+        "Use extract_line_items or extract_totals for partial extraction. "
+        "Use validate_invoice to check math. Use export_to_csv for batch processing."
+    ),
+    host="0.0.0.0",
+    port=_PORT,
+)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _err(msg: str) -> str:
+    return json.dumps({"ok": False, "error": msg})
+
+
+def _resolve_file(file_path: str) -> tuple[Path | None, str | None]:
+    """Expand and validate file path. Returns (path, None) or (None, error)."""
+    try:
+        p = Path(file_path).expanduser().resolve()
+    except Exception as e:
+        return None, f"Invalid path: {e}"
+    if not p.exists():
+        return None, f"File not found: {p}"
+    if not p.is_file():
+        return None, f"Not a file: {p}"
+    return p, None
+
+
+def _file_to_vision_content(path: Path) -> dict:
+    """Convert a file to an Anthropic vision content block."""
+    suffix = path.suffix.lower()
+
+    if suffix == ".pdf":
+        # Use base64 PDF document block
+        data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": data,
+            },
+        }
+    else:
+        # Image file
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
+        media_type = mime_map.get(suffix, "image/jpeg")
+        data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+
+
+def _vision_call(file_path: Path, prompt: str) -> str:
+    """Send a file + prompt to Claude Vision, return the text response."""
+    client = _get_client()
+    content_block = _file_to_vision_content(file_path)
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    content_block,
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    )
+    return response.content[0].text
+
+
+def _auth_check(
+    api_key: str | None,
+    payment_proof: str | None,
+    tool_name: str,
+    price: float,
+) -> str | None:
+    """
+    Unified auth check for all tools.
+    Returns None if authorized, or a JSON error string if not.
+    """
+    # 1. API key path
+    if api_key:
+        ok, err = validate_and_charge(api_key)
+        if not ok:
+            return _err(err)
+        return None
+
+    # 2. x402 payment proof path
+    if payment_proof:
+        tx = payment_proof.strip()
+        if is_proof_used(tx):
+            return _err("Payment proof already used. Each transaction can only be used once.")
+        ok, err = verify_payment(tx, price, WALLET_ADDRESS)
+        if not ok:
+            return _err(f"Payment verification failed: {err}")
+        mark_proof_used(tx, tool_name)
+        return None
+
+    # 3. Neither — return payment instructions
+    resp = payment_required_response(tool_name)
+    resp["x402"]["amount_usdc"] = price
+    resp["x402"]["amount_raw"] = int(price * 1_000_000)
+    return json.dumps(resp)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def parse_invoice(
+    file_path: Annotated[str, Field(description="Absolute path to the invoice PDF or image (PNG, JPG, WEBP).")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Parse a vendor invoice into structured JSON.
+
+    Extracts: vendor name, vendor address, invoice number, invoice date, due date,
+    line items (description, quantity, unit price, total), subtotal, tax amount,
+    tax rate, total amount, currency, payment terms, and notes.
+
+    Supports PDF and image files. Returns a JSON object.
+    Cost: $0.05 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "parse_invoice", PRICE_PARSE)
+    if auth_err:
+        return auth_err
+
+    path, err = _resolve_file(file_path)
+    if err:
+        return _err(err)
+
+    prompt = """Extract all invoice data from this document and return ONLY valid JSON with this exact structure:
+{
+  "ok": true,
+  "document_type": "invoice",
+  "vendor": {
+    "name": "",
+    "address": "",
+    "email": "",
+    "phone": "",
+    "tax_id": ""
+  },
+  "bill_to": {
+    "name": "",
+    "address": "",
+    "email": ""
+  },
+  "invoice_number": "",
+  "invoice_date": "",
+  "due_date": "",
+  "payment_terms": "",
+  "currency": "",
+  "line_items": [
+    {
+      "description": "",
+      "quantity": 0,
+      "unit_price": 0.0,
+      "total": 0.0,
+      "tax_rate": 0.0
+    }
+  ],
+  "subtotal": 0.0,
+  "discount": 0.0,
+  "tax_amount": 0.0,
+  "shipping": 0.0,
+  "total": 0.0,
+  "amount_due": 0.0,
+  "notes": "",
+  "po_number": ""
+}
+
+Use null for any fields not found in the document. Return ONLY the JSON, no explanation."""
+
+    try:
+        result_text = _vision_call(path, prompt)
+        # Extract JSON from response (Claude sometimes adds markdown)
+        text = result_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2)
+    except json.JSONDecodeError as e:
+        logger.error("parse_invoice: JSON parse error: %s", e)
+        return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
+    except Exception as e:
+        logger.error("parse_invoice error: %s", e)
+        return _err(f"Vision API error: {e}")
+
+
+@mcp.tool()
+def parse_receipt(
+    file_path: Annotated[str, Field(description="Absolute path to the receipt PDF or image (PNG, JPG, WEBP).")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Parse a retail receipt or expense receipt into structured JSON.
+
+    Extracts: merchant name, date, time, items purchased (name, quantity, price),
+    subtotal, tax, total, payment method, and transaction ID.
+
+    Supports PDF and image files. Returns a JSON object.
+    Cost: $0.05 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "parse_receipt", PRICE_PARSE)
+    if auth_err:
+        return auth_err
+
+    path, err = _resolve_file(file_path)
+    if err:
+        return _err(err)
+
+    prompt = """Extract all receipt data from this document and return ONLY valid JSON with this exact structure:
+{
+  "ok": true,
+  "document_type": "receipt",
+  "merchant": {
+    "name": "",
+    "address": "",
+    "phone": "",
+    "website": ""
+  },
+  "date": "",
+  "time": "",
+  "receipt_number": "",
+  "cashier": "",
+  "items": [
+    {
+      "name": "",
+      "quantity": 1,
+      "unit_price": 0.0,
+      "total": 0.0,
+      "sku": "",
+      "category": ""
+    }
+  ],
+  "subtotal": 0.0,
+  "discounts": 0.0,
+  "tax": 0.0,
+  "tip": 0.0,
+  "total": 0.0,
+  "currency": "",
+  "payment_method": "",
+  "card_last_four": "",
+  "transaction_id": "",
+  "loyalty_points": null,
+  "notes": ""
+}
+
+Use null for any fields not found. Return ONLY the JSON, no explanation."""
+
+    try:
+        result_text = _vision_call(path, prompt)
+        text = result_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2)
+    except json.JSONDecodeError as e:
+        logger.error("parse_receipt: JSON parse error: %s", e)
+        return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
+    except Exception as e:
+        logger.error("parse_receipt error: %s", e)
+        return _err(f"Vision API error: {e}")
+
+
+@mcp.tool()
+def extract_line_items(
+    file_path: Annotated[str, Field(description="Absolute path to the invoice or receipt PDF or image.")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Extract only the line items from an invoice or receipt.
+
+    Faster and cheaper than full parse when you only need the itemized list.
+    Returns an array of line items with description, quantity, unit price, and total.
+
+    Cost: $0.01 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "extract_line_items", PRICE_EXTRACT)
+    if auth_err:
+        return auth_err
+
+    path, err = _resolve_file(file_path)
+    if err:
+        return _err(err)
+
+    prompt = """Extract ONLY the line items from this document. Return ONLY valid JSON:
+{
+  "ok": true,
+  "line_items": [
+    {
+      "description": "",
+      "quantity": 0,
+      "unit_price": 0.0,
+      "total": 0.0
+    }
+  ],
+  "item_count": 0
+}
+
+Return ONLY the JSON, no explanation."""
+
+    try:
+        result_text = _vision_call(path, prompt)
+        text = result_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2)
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
+    except Exception as e:
+        logger.error("extract_line_items error: %s", e)
+        return _err(f"Vision API error: {e}")
+
+
+@mcp.tool()
+def extract_totals(
+    file_path: Annotated[str, Field(description="Absolute path to the invoice or receipt PDF or image.")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Extract only the financial totals from an invoice or receipt.
+
+    Returns subtotal, tax, discount, shipping, and total — without line items.
+    Useful when you need amounts quickly without parsing the full document.
+
+    Cost: $0.01 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "extract_totals", PRICE_EXTRACT)
+    if auth_err:
+        return auth_err
+
+    path, err = _resolve_file(file_path)
+    if err:
+        return _err(err)
+
+    prompt = """Extract ONLY the financial totals from this document. Return ONLY valid JSON:
+{
+  "ok": true,
+  "currency": "",
+  "subtotal": 0.0,
+  "discount": 0.0,
+  "tax_amount": 0.0,
+  "tax_rate": 0.0,
+  "shipping": 0.0,
+  "tip": 0.0,
+  "total": 0.0,
+  "amount_due": 0.0,
+  "invoice_date": "",
+  "due_date": ""
+}
+
+Return ONLY the JSON, no explanation."""
+
+    try:
+        result_text = _vision_call(path, prompt)
+        text = result_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2)
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
+    except Exception as e:
+        logger.error("extract_totals error: %s", e)
+        return _err(f"Vision API error: {e}")
+
+
+@mcp.tool()
+def validate_invoice(
+    file_path: Annotated[str, Field(description="Absolute path to the invoice PDF or image.")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Validate the math on an invoice — check that line items add up correctly.
+
+    Detects: line item totals that don't match (quantity × unit_price),
+    subtotal that doesn't match sum of line items, tax calculation errors,
+    and final total discrepancies.
+
+    Returns {valid: bool, issues: [], summary: {}}.
+
+    Cost: $0.01 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "validate_invoice", PRICE_EXTRACT)
+    if auth_err:
+        return auth_err
+
+    path, err = _resolve_file(file_path)
+    if err:
+        return _err(err)
+
+    prompt = """Carefully validate the mathematics of this invoice. Extract all numbers and check:
+1. Does each line item total = quantity × unit_price? (allow ±0.02 rounding)
+2. Does subtotal = sum of all line item totals? (allow ±0.02 rounding)
+3. Is the tax calculation correct given the tax rate shown?
+4. Does total = subtotal + tax - discount + shipping? (allow ±0.02 rounding)
+
+Return ONLY valid JSON:
+{
+  "ok": true,
+  "valid": true,
+  "issues": [
+    {
+      "field": "",
+      "expected": 0.0,
+      "found": 0.0,
+      "description": ""
+    }
+  ],
+  "summary": {
+    "line_items_checked": 0,
+    "subtotal": 0.0,
+    "tax": 0.0,
+    "total": 0.0,
+    "currency": ""
+  }
+}
+
+Set valid=false if any issues are found. Return ONLY the JSON, no explanation."""
+
+    try:
+        result_text = _vision_call(path, prompt)
+        text = result_text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        parsed = json.loads(text)
+        return json.dumps(parsed, indent=2)
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
+    except Exception as e:
+        logger.error("validate_invoice error: %s", e)
+        return _err(f"Vision API error: {e}")
+
+
+@mcp.tool()
+def export_to_csv(
+    file_paths: Annotated[list[str], Field(description="List of absolute paths to invoice/receipt PDFs or images to process.")],
+    output_path: Annotated[str, Field(description="Absolute path where the output CSV file will be saved.")],
+    api_key: Annotated[str | None, Field(description="Your InvoiceParser API key.")] = None,
+    payment_proof: Annotated[str | None, Field(description="x402 payment proof (Base tx hash). Alternative to api_key.")] = None,
+) -> str:
+    """
+    Parse multiple invoices or receipts and export a summary CSV.
+
+    Each row in the CSV contains: filename, document_type, vendor/merchant,
+    date, invoice_number, subtotal, tax, total, currency, due_date.
+
+    Useful for batch expense processing and bookkeeping workflows.
+    Maximum 20 files per call.
+
+    Cost: $0.10 USDC per call (x402) or counts against your API key quota.
+    """
+    auth_err = _auth_check(api_key, payment_proof, "export_to_csv", PRICE_EXPORT)
+    if auth_err:
+        return auth_err
+
+    if len(file_paths) > 20:
+        return _err("Maximum 20 files per export_to_csv call.")
+
+    output = Path(output_path).expanduser().resolve()
+    os.makedirs(output.parent, exist_ok=True)
+
+    rows = []
+    errors = []
+
+    for fp in file_paths:
+        path, err = _resolve_file(fp)
+        if err:
+            errors.append({"file": fp, "error": err})
+            continue
+
+        prompt = """Extract key data from this invoice or receipt. Return ONLY valid JSON:
+{
+  "document_type": "invoice or receipt",
+  "vendor_or_merchant": "",
+  "date": "",
+  "invoice_or_receipt_number": "",
+  "subtotal": 0.0,
+  "tax": 0.0,
+  "total": 0.0,
+  "currency": "",
+  "due_date": "",
+  "payment_method": ""
+}
+Return ONLY the JSON."""
+
+        try:
+            result_text = _vision_call(path, prompt)
+            text = result_text.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            data = json.loads(text)
+            rows.append({
+                "filename": path.name,
+                "document_type": data.get("document_type", ""),
+                "vendor_merchant": data.get("vendor_or_merchant", ""),
+                "date": data.get("date", ""),
+                "number": data.get("invoice_or_receipt_number", ""),
+                "subtotal": data.get("subtotal", ""),
+                "tax": data.get("tax", ""),
+                "total": data.get("total", ""),
+                "currency": data.get("currency", ""),
+                "due_date": data.get("due_date", ""),
+                "payment_method": data.get("payment_method", ""),
+            })
+        except Exception as e:
+            errors.append({"file": fp, "error": str(e)})
+
+    if not rows and errors:
+        return _err(f"All files failed to parse: {errors}")
+
+    fieldnames = ["filename", "document_type", "vendor_merchant", "date", "number",
+                  "subtotal", "tax", "total", "currency", "due_date", "payment_method"]
+
+    with open(output, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return json.dumps({
+        "ok": True,
+        "output_path": str(output),
+        "rows_written": len(rows),
+        "errors": errors,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint + startup
+# ---------------------------------------------------------------------------
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+
+async def health(request: Request):
+    return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
+
+
+def build_app():
+    mcp_app = mcp.streamable_http_app()
+    routes = [Route("/health", health)]
+    app = Starlette(routes=routes)
+    app.mount("/", mcp_app)
+    return app
+
+
+if __name__ == "__main__":
+    import uvicorn
+    app = build_app()
+    uvicorn.run(app, host="0.0.0.0", port=_PORT)

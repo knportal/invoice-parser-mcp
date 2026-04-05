@@ -1,0 +1,18 @@
+# Invoice Parser MCP — Python dependencies
+
+# MCP server framework
+mcp>=1.0.0
+
+# Claude Vision API
+anthropic>=0.40.0
+
+# HTTP server for Railway deployment
+uvicorn>=0.29.0
+starlette>=0.36.0
+
+# HTTP requests (for x402 Base RPC calls)
+requests>=2.31.0
+
+# Stripe (for webhook handling)
+flask>=3.0.0
+stripe>=8.0.0
