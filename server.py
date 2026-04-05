@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-from config import LOG_FILE, LOG_LEVEL, ANTHROPIC_API_KEY, CLAUDE_MODEL
+from config import LOG_FILE, LOG_LEVEL, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CLAUDE_MODEL
 
 os.makedirs(os.path.dirname(LOG_FILE) if os.path.dirname(LOG_FILE) else ".", exist_ok=True)
 
@@ -70,8 +70,16 @@ def _get_client() -> anthropic.Anthropic:
     global _anthropic_client
     if _anthropic_client is None:
         if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY environment variable is not set. "
+                "On Railway: set it to a real Anthropic API key. "
+                "Locally via maxproxy: set ANTHROPIC_API_KEY=maxproxy and "
+                "ANTHROPIC_BASE_URL=http://localhost:3456"
+            )
+        kwargs: dict = {"api_key": ANTHROPIC_API_KEY}
+        if ANTHROPIC_BASE_URL:
+            kwargs["base_url"] = ANTHROPIC_BASE_URL
+        _anthropic_client = anthropic.Anthropic(**kwargs)
     return _anthropic_client
 
 

@@ -60,12 +60,23 @@ Extracts structured data from PDF invoices, scanned receipts, and image files. N
 1. Fork this repo
 2. Connect to Railway → New Project → Deploy from GitHub
 3. Add environment variables:
-   - `ANTHROPIC_API_KEY` — your Anthropic API key
+   - `ANTHROPIC_API_KEY` — your Anthropic API key (required; Railway runs in the cloud and calls the Anthropic API directly)
    - `INVOICEPARSER_DATA_DIR` — `/data`
    - `STRIPE_WEBHOOK_SECRET` — from Stripe dashboard
    - `STRIPE_PRO_PRICE_ID` — from Stripe dashboard
 4. Add a persistent volume at `/data`
 5. Deploy
+
+## Running locally (optional maxproxy routing)
+
+If you run the server on the same machine as a maxproxy instance on port 3456, you can route Claude Vision calls through it instead of hitting the Anthropic API directly:
+
+```
+ANTHROPIC_API_KEY=maxproxy
+ANTHROPIC_BASE_URL=http://localhost:3456
+```
+
+Leave `ANTHROPIC_BASE_URL` unset (or empty) in any cloud/Railway deployment — those environments cannot reach a local proxy.
 
 ## License
 

@@ -6,7 +6,12 @@ All values are read from environment variables with safe defaults.
 import os
 
 # Claude Vision API
+# ANTHROPIC_API_KEY must be set on Railway (real Anthropic key).
+# When running locally and routing through maxproxy, set:
+#   ANTHROPIC_BASE_URL=http://localhost:3456
+#   ANTHROPIC_API_KEY=maxproxy  (any non-empty string)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
 
 # Stripe
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
