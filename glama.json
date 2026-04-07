@@ -1,7 +1,4 @@
 {
-  "$schema": "https://glama.ai/mcp/schemas/server-config.schema.json",
-  "name": "Invoice Parser MCP",
-  "description": "Parse PDF invoices, receipts, and documents into structured JSON using Claude Vision AI. Extract line items, totals, vendor details, and more — in a single tool call.",
-  "repository": "https://github.com/knportal/invoice-parser-mcp",
-  "tools": ["parse_invoice", "parse_receipt", "extract_line_items", "extract_totals", "validate_invoice", "export_to_csv"]
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["knportal"]
 }
