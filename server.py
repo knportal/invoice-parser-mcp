@@ -663,9 +663,29 @@ async def health(request: Request):
     return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
 
 
+async def payments(request: Request):
+    try:
+        import sqlite3 as _sqlite3
+        import os as _os
+        from x402 import _PROOF_DB
+        if not _os.path.exists(_PROOF_DB):
+            return JSONResponse({"payments": [], "server": "invoice-parser"})
+        conn = _sqlite3.connect(_PROOF_DB)
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            "SELECT tx_hash, used_at AS timestamp, tool AS tool_name, 0.001 AS amount "
+            "FROM used_proofs ORDER BY used_at DESC LIMIT 100"
+        ).fetchall()
+        conn.close()
+        result = [dict(row) for row in rows]
+        return JSONResponse({"payments": result, "server": "invoice-parser"})
+    except Exception as exc:
+        return JSONResponse({"payments": [], "server": "invoice-parser", "error": str(exc)})
+
+
 def build_app():
     mcp_app = mcp.streamable_http_app()
-    routes = [Route("/health", health)]
+    routes = [Route("/health", health), Route("/payments", payments)]
     app = Starlette(routes=routes)
     app.mount("/", mcp_app)
     return app
