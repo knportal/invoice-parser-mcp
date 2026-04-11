@@ -4,3 +4,4 @@ builder = "dockerfile"
 [deploy]
 startCommand = "python server.py"
 restartPolicyType = "always"
+
