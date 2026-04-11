@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import sys
+import time as _time
 from pathlib import Path
 from typing import Annotated
 
@@ -55,6 +56,85 @@ from x402 import (  # noqa: E402
     payment_required_response,
     verify_payment,
 )
+
+# In-memory stats
+import sqlite3 as _sqlite3
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+_stats: dict = {
+    "total_calls": 0,
+    "errors": 0,
+    "start_time": _time.time(),
+    "tools_breakdown": {},
+    "vision_calls": 0,
+}
+
+
+def _track_tool(tool_name: str) -> None:
+    """Increment per-tool call counter."""
+    _stats["tools_breakdown"][tool_name] = _stats["tools_breakdown"].get(tool_name, 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# SQLite analytics logger
+# ---------------------------------------------------------------------------
+_ANALYTICS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analytics.db")
+
+
+def _init_analytics_db() -> None:
+    """Create the analytics table if it doesn't exist."""
+    conn = _sqlite3.connect(_ANALYTICS_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_name   TEXT    NOT NULL,
+            timestamp   TEXT    NOT NULL,
+            payment_received INTEGER NOT NULL DEFAULT 0,
+            amount_usdc REAL    NOT NULL DEFAULT 0.0,
+            success     INTEGER NOT NULL DEFAULT 1,
+            latency_ms  INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _log_call(
+    tool_name: str,
+    payment_received: bool,
+    amount_usdc: float,
+    success: bool,
+    latency_ms: int,
+) -> None:
+    """Insert one analytics row. Never raises — failures are logged silently."""
+    try:
+        conn = _sqlite3.connect(_ANALYTICS_DB)
+        conn.execute(
+            """
+            INSERT INTO tool_calls
+                (tool_name, timestamp, payment_received, amount_usdc, success, latency_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tool_name,
+                _dt.now(_tz.utc).isoformat(),
+                int(payment_received),
+                amount_usdc,
+                int(success),
+                latency_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("analytics log failed: %s", exc)
+
+
+# Initialise DB at import time (no-op if table already exists)
+try:
+    _init_analytics_db()
+except Exception as _exc:
+    logger.warning("Could not initialise analytics DB: %s", _exc)
 
 # Pricing per tool (USDC)
 PRICE_PARSE = 0.05      # parse_invoice, parse_receipt
@@ -161,6 +241,7 @@ def _file_to_vision_content(path: Path) -> dict:
 
 def _vision_call(file_path: Path, prompt: str) -> str:
     """Send a file + prompt to Claude Vision, return the text response."""
+    _stats["vision_calls"] += 1
     client = _get_client()
     content_block = _file_to_vision_content(file_path)
     response = client.messages.create(
@@ -234,12 +315,18 @@ def parse_invoice(
     Supports PDF and image files. Returns a JSON object.
     Cost: $0.05 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("parse_invoice")
+    _t0 = _time.monotonic()
+    _paid = bool(payment_proof)
     auth_err = _auth_check(api_key, payment_proof, "parse_invoice", PRICE_PARSE)
     if auth_err:
+        _log_call("parse_invoice", False, 0.0, False, int((_time.monotonic() - _t0) * 1000))
         return auth_err
 
     path, err = _resolve_file(file_path)
     if err:
+        _log_call("parse_invoice", _paid, PRICE_PARSE if _paid else 0.0, False, int((_time.monotonic() - _t0) * 1000))
         return _err(err)
 
     prompt = """Extract all invoice data from this document and return ONLY valid JSON with this exact structure:
@@ -292,12 +379,15 @@ Use null for any fields not found in the document. Return ONLY the JSON, no expl
             lines = text.split("\n")
             text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
         parsed = json.loads(text)
+        _log_call("parse_invoice", _paid, PRICE_PARSE if _paid else 0.0, True, int((_time.monotonic() - _t0) * 1000))
         return json.dumps(parsed, indent=2)
     except json.JSONDecodeError as e:
         logger.error("parse_invoice: JSON parse error: %s", e)
+        _log_call("parse_invoice", _paid, PRICE_PARSE if _paid else 0.0, False, int((_time.monotonic() - _t0) * 1000))
         return json.dumps({"ok": True, "raw": result_text, "parse_error": str(e)})
     except Exception as e:
         logger.error("parse_invoice error: %s", e)
+        _log_call("parse_invoice", _paid, PRICE_PARSE if _paid else 0.0, False, int((_time.monotonic() - _t0) * 1000))
         return _err(f"Vision API error: {e}")
 
 
@@ -316,6 +406,8 @@ def parse_receipt(
     Supports PDF and image files. Returns a JSON object.
     Cost: $0.05 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("parse_receipt")
     auth_err = _auth_check(api_key, payment_proof, "parse_receipt", PRICE_PARSE)
     if auth_err:
         return auth_err
@@ -393,6 +485,8 @@ def extract_line_items(
 
     Cost: $0.01 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("extract_line_items")
     auth_err = _auth_check(api_key, payment_proof, "extract_line_items", PRICE_EXTRACT)
     if auth_err:
         return auth_err
@@ -446,6 +540,8 @@ def extract_totals(
 
     Cost: $0.01 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("extract_totals")
     auth_err = _auth_check(api_key, payment_proof, "extract_totals", PRICE_EXTRACT)
     if auth_err:
         return auth_err
@@ -504,6 +600,8 @@ def validate_invoice(
 
     Cost: $0.01 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("validate_invoice")
     auth_err = _auth_check(api_key, payment_proof, "validate_invoice", PRICE_EXTRACT)
     if auth_err:
         return auth_err
@@ -574,6 +672,8 @@ def export_to_csv(
 
     Cost: $0.10 USDC per call (x402) or counts against your API key quota.
     """
+    _stats["total_calls"] += 1
+    _track_tool("export_to_csv")
     auth_err = _auth_check(api_key, payment_proof, "export_to_csv", PRICE_EXPORT)
     if auth_err:
         return auth_err
@@ -663,6 +763,99 @@ async def health(request: Request):
     return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
 
 
+async def analytics_endpoint(request: Request):
+    uptime = _time.time() - (_stats["start_time"] or _time.time())
+    return JSONResponse({
+        "server": "invoice-parser-mcp",
+        "total_calls": _stats["total_calls"],
+        "errors": _stats["errors"],
+        "uptime_seconds": int(uptime),
+        "version": "1.0.0",
+    })
+
+
+async def stats_endpoint(request: Request):
+    """Full /stats endpoint for analytics dashboard."""
+    import sqlite3 as _sqlite3
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from x402 import _PROOF_DB
+
+    now = _dt.now(_tz.utc)
+    today_str = now.strftime("%Y-%m-%d")
+    week_ago = (now - _td(days=7)).isoformat()
+
+    revenue_total = 0.0
+    revenue_this_week = 0.0
+    unique_callers = 0
+    calls_today = 0
+    calls_this_week = 0
+
+    if os.path.exists(_PROOF_DB):
+        try:
+            conn = _sqlite3.connect(_PROOF_DB)
+            conn.row_factory = _sqlite3.Row
+
+            # Total revenue — per-tool pricing
+            rows = conn.execute("SELECT tool FROM used_proofs").fetchall()
+            price_map = {
+                "parse_invoice": 0.05, "parse_receipt": 0.05,
+                "extract_line_items": 0.01, "extract_totals": 0.01,
+                "validate_invoice": 0.01, "export_to_csv": 0.10,
+            }
+            for r in rows:
+                revenue_total += price_map.get(r["tool"], 0.01)
+
+            # Revenue this week
+            rows_week = conn.execute(
+                "SELECT tool FROM used_proofs WHERE used_at >= ?", (week_ago,)
+            ).fetchall()
+            for r in rows_week:
+                revenue_this_week += price_map.get(r["tool"], 0.01)
+
+            # Unique callers
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT SUBSTR(tx_hash, 1, 42)) AS cnt FROM used_proofs"
+            ).fetchone()
+            unique_callers = row["cnt"] if row else 0
+
+            # Calls today
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at LIKE ?",
+                (today_str + "%",),
+            ).fetchone()
+            calls_today = row["cnt"] if row else 0
+
+            # Calls this week
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at >= ?",
+                (week_ago,),
+            ).fetchone()
+            calls_this_week = row["cnt"] if row else 0
+
+            conn.close()
+        except Exception:
+            pass
+
+    # API cost estimate: vision_calls * $0.01 avg
+    api_cost = _stats.get("vision_calls", 0) * 0.01
+
+    return JSONResponse({
+        "server": "invoice-parser-mcp",
+        "total_calls": _stats["total_calls"],
+        "calls_today": calls_today,
+        "calls_this_week": calls_this_week,
+        "unique_callers": unique_callers,
+        "revenue_total": round(revenue_total, 6),
+        "revenue_this_week": round(revenue_this_week, 6),
+        "api_cost_estimate": round(api_cost, 4),
+        "tools_breakdown": _stats.get("tools_breakdown", {}),
+        "uptime_since": _dt.fromtimestamp(
+            _stats["start_time"], tz=_tz.utc
+        ).isoformat() if _stats["start_time"] else None,
+        "version": "1.0.0",
+    })
+
+
 async def payments(request: Request):
     try:
         import sqlite3 as _sqlite3
@@ -685,9 +878,13 @@ async def payments(request: Request):
 
 def build_app():
     mcp_app = mcp.streamable_http_app()
-    routes = [Route("/health", health), Route("/payments", payments)]
-    app = Starlette(routes=routes)
-    app.mount("/", mcp_app)
+    app = Starlette(routes=[
+        Route("/health", health),
+        Route("/analytics", analytics_endpoint),
+        Route("/stats", stats_endpoint),
+        Route("/payments", payments),
+        Mount("/", app=mcp_app),
+    ])
     return app
 
 
