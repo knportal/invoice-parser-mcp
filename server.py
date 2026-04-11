@@ -751,19 +751,20 @@ Return ONLY the JSON."""
 
 
 # ---------------------------------------------------------------------------
-# Health endpoint + startup
+# Custom HTTP endpoints — registered directly on FastMCP via custom_route
+# so they live inside FastMCP's own Starlette app alongside /mcp.
 # ---------------------------------------------------------------------------
-from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 
-async def health(request: Request):
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
 
 
-async def analytics_endpoint(request: Request):
+@mcp.custom_route("/analytics", methods=["GET"])
+async def analytics_endpoint(request: Request) -> JSONResponse:
     uptime = _time.time() - (_stats["start_time"] or _time.time())
     return JSONResponse({
         "server": "invoice-parser-mcp",
@@ -774,8 +775,8 @@ async def analytics_endpoint(request: Request):
     })
 
 
-async def stats_endpoint(request: Request):
-    """Full /stats endpoint for analytics dashboard."""
+@mcp.custom_route("/stats", methods=["GET"])
+async def stats_endpoint(request: Request) -> JSONResponse:
     import sqlite3 as _sqlite3
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     from x402 import _PROOF_DB
@@ -795,48 +796,37 @@ async def stats_endpoint(request: Request):
             conn = _sqlite3.connect(_PROOF_DB)
             conn.row_factory = _sqlite3.Row
 
-            # Total revenue — per-tool pricing
-            rows = conn.execute("SELECT tool FROM used_proofs").fetchall()
             price_map = {
                 "parse_invoice": 0.05, "parse_receipt": 0.05,
                 "extract_line_items": 0.01, "extract_totals": 0.01,
                 "validate_invoice": 0.01, "export_to_csv": 0.10,
             }
-            for r in rows:
+            for r in conn.execute("SELECT tool FROM used_proofs").fetchall():
                 revenue_total += price_map.get(r["tool"], 0.01)
-
-            # Revenue this week
-            rows_week = conn.execute(
+            for r in conn.execute(
                 "SELECT tool FROM used_proofs WHERE used_at >= ?", (week_ago,)
-            ).fetchall()
-            for r in rows_week:
+            ).fetchall():
                 revenue_this_week += price_map.get(r["tool"], 0.01)
 
-            # Unique callers
             row = conn.execute(
                 "SELECT COUNT(DISTINCT SUBSTR(tx_hash, 1, 42)) AS cnt FROM used_proofs"
             ).fetchone()
             unique_callers = row["cnt"] if row else 0
 
-            # Calls today
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at LIKE ?",
                 (today_str + "%",),
             ).fetchone()
             calls_today = row["cnt"] if row else 0
 
-            # Calls this week
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at >= ?",
-                (week_ago,),
+                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at >= ?", (week_ago,)
             ).fetchone()
             calls_this_week = row["cnt"] if row else 0
-
             conn.close()
         except Exception:
             pass
 
-    # API cost estimate: vision_calls * $0.01 avg
     api_cost = _stats.get("vision_calls", 0) * 0.01
 
     return JSONResponse({
@@ -856,7 +846,8 @@ async def stats_endpoint(request: Request):
     })
 
 
-async def payments(request: Request):
+@mcp.custom_route("/payments", methods=["GET"])
+async def payments(request: Request) -> JSONResponse:
     try:
         import sqlite3 as _sqlite3
         import os as _os
@@ -870,25 +861,10 @@ async def payments(request: Request):
             "FROM used_proofs ORDER BY used_at DESC LIMIT 100"
         ).fetchall()
         conn.close()
-        result = [dict(row) for row in rows]
-        return JSONResponse({"payments": result, "server": "invoice-parser"})
+        return JSONResponse({"payments": [dict(r) for r in rows], "server": "invoice-parser"})
     except Exception as exc:
         return JSONResponse({"payments": [], "server": "invoice-parser", "error": str(exc)})
 
 
-def build_app():
-    mcp_app = mcp.streamable_http_app()
-    app = Starlette(routes=[
-        Route("/health", health),
-        Route("/analytics", analytics_endpoint),
-        Route("/stats", stats_endpoint),
-        Route("/payments", payments),
-        Mount("/", app=mcp_app),
-    ])
-    return app
-
-
 if __name__ == "__main__":
-    import uvicorn
-    app = build_app()
-    uvicorn.run(app, host="0.0.0.0", port=_PORT)
+    mcp.run(transport="streamable-http")
