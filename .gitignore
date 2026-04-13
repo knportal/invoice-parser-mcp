@@ -14,3 +14,4 @@ logs/
 *.log
 *.p8
 .secrets/
+.railway-deploy-trigger
