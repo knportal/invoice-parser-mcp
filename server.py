@@ -750,120 +750,112 @@ Return ONLY the JSON."""
     })
 
 
-if __name__ == "__main__":
-    import uvicorn
-    from starlette.applications import Starlette
-    from starlette.requests import Request
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request):
     from starlette.responses import JSONResponse
-    from starlette.routing import Mount, Route
+    return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
 
-    async def health(request: Request):
-        return JSONResponse({"status": "ok", "service": "invoice-parser-mcp"})
 
-    async def analytics_endpoint(request: Request):
-        uptime = _time.time() - (_stats["start_time"] or _time.time())
-        return JSONResponse({
-            "server": "invoice-parser-mcp",
-            "total_calls": _stats["total_calls"],
-            "errors": _stats["errors"],
-            "uptime_seconds": int(uptime),
-            "version": "1.0.0",
-        })
+@mcp.custom_route("/analytics", methods=["GET"])
+async def analytics_endpoint(request):
+    from starlette.responses import JSONResponse
+    uptime = _time.time() - (_stats["start_time"] or _time.time())
+    return JSONResponse({
+        "server": "invoice-parser-mcp",
+        "total_calls": _stats["total_calls"],
+        "errors": _stats["errors"],
+        "uptime_seconds": int(uptime),
+        "version": "1.0.0",
+    })
 
-    async def stats_endpoint(request: Request):
-        import sqlite3 as _sqlite3
-        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-        from x402 import _PROOF_DB
 
-        now = _dt.now(_tz.utc)
-        today_str = now.strftime("%Y-%m-%d")
-        week_ago = (now - _td(days=7)).isoformat()
+@mcp.custom_route("/stats", methods=["GET"])
+async def stats_endpoint(request):
+    from starlette.responses import JSONResponse
+    import sqlite3 as _sqlite3
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from x402 import _PROOF_DB
 
-        revenue_total = 0.0
-        revenue_this_week = 0.0
-        unique_callers = 0
-        calls_today = 0
-        calls_this_week = 0
+    now = _dt.now(_tz.utc)
+    today_str = now.strftime("%Y-%m-%d")
+    week_ago = (now - _td(days=7)).isoformat()
 
-        if os.path.exists(_PROOF_DB):
-            try:
-                conn = _sqlite3.connect(_PROOF_DB)
-                conn.row_factory = _sqlite3.Row
+    revenue_total = 0.0
+    revenue_this_week = 0.0
+    unique_callers = 0
+    calls_today = 0
+    calls_this_week = 0
 
-                price_map = {
-                    "parse_invoice": 0.05, "parse_receipt": 0.05,
-                    "extract_line_items": 0.01, "extract_totals": 0.01,
-                    "validate_invoice": 0.01, "export_to_csv": 0.10,
-                }
-                for r in conn.execute("SELECT tool FROM used_proofs").fetchall():
-                    revenue_total += price_map.get(r["tool"], 0.01)
-                for r in conn.execute(
-                    "SELECT tool FROM used_proofs WHERE used_at >= ?", (week_ago,)
-                ).fetchall():
-                    revenue_this_week += price_map.get(r["tool"], 0.01)
-
-                row = conn.execute(
-                    "SELECT COUNT(DISTINCT SUBSTR(tx_hash, 1, 42)) AS cnt FROM used_proofs"
-                ).fetchone()
-                unique_callers = row["cnt"] if row else 0
-
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at LIKE ?",
-                    (today_str + "%",),
-                ).fetchone()
-                calls_today = row["cnt"] if row else 0
-
-                row = conn.execute(
-                    "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at >= ?", (week_ago,)
-                ).fetchone()
-                calls_this_week = row["cnt"] if row else 0
-                conn.close()
-            except Exception:
-                pass
-
-        api_cost = _stats.get("vision_calls", 0) * 0.01
-
-        return JSONResponse({
-            "server": "invoice-parser-mcp",
-            "total_calls": _stats["total_calls"],
-            "calls_today": calls_today,
-            "calls_this_week": calls_this_week,
-            "unique_callers": unique_callers,
-            "revenue_total": round(revenue_total, 6),
-            "revenue_this_week": round(revenue_this_week, 6),
-            "api_cost_estimate": round(api_cost, 4),
-            "tools_breakdown": _stats.get("tools_breakdown", {}),
-            "uptime_since": _dt.fromtimestamp(
-                _stats["start_time"], tz=_tz.utc
-            ).isoformat() if _stats["start_time"] else None,
-            "version": "1.0.0",
-        })
-
-    async def payments(request: Request):
+    if os.path.exists(_PROOF_DB):
         try:
-            import sqlite3 as _sqlite3
-            from x402 import _PROOF_DB
-            if not os.path.exists(_PROOF_DB):
-                return JSONResponse({"payments": [], "server": "invoice-parser"})
             conn = _sqlite3.connect(_PROOF_DB)
             conn.row_factory = _sqlite3.Row
-            rows = conn.execute(
-                "SELECT tx_hash, used_at AS timestamp, tool AS tool_name, 0.001 AS amount "
-                "FROM used_proofs ORDER BY used_at DESC LIMIT 100"
-            ).fetchall()
+            price_map = {
+                "parse_invoice": 0.05, "parse_receipt": 0.05,
+                "extract_line_items": 0.01, "extract_totals": 0.01,
+                "validate_invoice": 0.01, "export_to_csv": 0.10,
+            }
+            for r in conn.execute("SELECT tool FROM used_proofs").fetchall():
+                revenue_total += price_map.get(r["tool"], 0.01)
+            for r in conn.execute(
+                "SELECT tool FROM used_proofs WHERE used_at >= ?", (week_ago,)
+            ).fetchall():
+                revenue_this_week += price_map.get(r["tool"], 0.01)
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT SUBSTR(tx_hash, 1, 42)) AS cnt FROM used_proofs"
+            ).fetchone()
+            unique_callers = row["cnt"] if row else 0
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at LIKE ?",
+                (today_str + "%",),
+            ).fetchone()
+            calls_today = row["cnt"] if row else 0
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM used_proofs WHERE used_at >= ?", (week_ago,)
+            ).fetchone()
+            calls_this_week = row["cnt"] if row else 0
             conn.close()
-            return JSONResponse({"payments": [dict(r) for r in rows], "server": "invoice-parser"})
-        except Exception as exc:
-            return JSONResponse({"payments": [], "server": "invoice-parser", "error": str(exc)})
+        except Exception:
+            pass
 
-    mcp_asgi = mcp.streamable_http_app()
-    app = Starlette(routes=[
-        Route("/health", health),
-        Route("/analytics", analytics_endpoint),
-        Route("/stats", stats_endpoint),
-        Route("/payments", payments),
-        Mount("/", app=mcp_asgi),
-    ])
+    api_cost = _stats.get("vision_calls", 0) * 0.01
+    return JSONResponse({
+        "server": "invoice-parser-mcp",
+        "total_calls": _stats["total_calls"],
+        "calls_today": calls_today,
+        "calls_this_week": calls_this_week,
+        "unique_callers": unique_callers,
+        "revenue_total": round(revenue_total, 6),
+        "revenue_this_week": round(revenue_this_week, 6),
+        "api_cost_estimate": round(api_cost, 4),
+        "tools_breakdown": _stats.get("tools_breakdown", {}),
+        "uptime_since": _dt.fromtimestamp(
+            _stats["start_time"], tz=_tz.utc
+        ).isoformat() if _stats["start_time"] else None,
+        "version": "1.0.0",
+    })
 
+
+@mcp.custom_route("/payments", methods=["GET"])
+async def payments(request):
+    from starlette.responses import JSONResponse
+    try:
+        import sqlite3 as _sqlite3
+        from x402 import _PROOF_DB
+        if not os.path.exists(_PROOF_DB):
+            return JSONResponse({"payments": [], "server": "invoice-parser"})
+        conn = _sqlite3.connect(_PROOF_DB)
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            "SELECT tx_hash, used_at AS timestamp, tool AS tool_name, 0.001 AS amount "
+            "FROM used_proofs ORDER BY used_at DESC LIMIT 100"
+        ).fetchall()
+        conn.close()
+        return JSONResponse({"payments": [dict(r) for r in rows], "server": "invoice-parser"})
+    except Exception as exc:
+        return JSONResponse({"payments": [], "server": "invoice-parser", "error": str(exc)})
+
+
+if __name__ == "__main__":
     logger.info(f"Invoice Parser MCP server starting up (streamable-http on :{_PORT})")
-    uvicorn.run(app, host="0.0.0.0", port=_PORT)
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=_PORT)
