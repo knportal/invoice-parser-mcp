@@ -857,5 +857,7 @@ async def payments(request):
 
 
 if __name__ == "__main__":
+    import uvicorn
     logger.info(f"Invoice Parser MCP server starting up (streamable-http on :{_PORT})")
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=_PORT)
+    app = mcp.streamable_http_app()
+    uvicorn.run(app, host="0.0.0.0", port=_PORT)
