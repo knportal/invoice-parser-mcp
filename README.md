@@ -6,6 +6,8 @@ Parse invoices, receipts, and financial documents into structured JSON — from 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen.svg)](https://modelcontextprotocol.io)
 
+**Listed on:** [Glama](https://glama.ai/mcp/servers/knportal/invoice-parser-mcp?ref=readme)
+
 Built for the [Model Context Protocol](https://modelcontextprotocol.io). Powered by Claude Vision.
 
 ## What it does
@@ -334,7 +336,7 @@ Batch parse up to 20 invoices or receipts and export a summary CSV. Each row con
 {
   "mcpServers": {
     "invoice-parser": {
-      "url": "https://invoice-parser.plenitudo.ai/mcp"
+      "url": "https://invoice-parser.plenitudo.ai/mcp?ref=readme"
     }
   }
 }
