@@ -1043,23 +1043,15 @@ _LANDING_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+@mcp.custom_route("/", methods=["GET"])
+async def landing_page(request):
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(_LANDING_HTML)
+
+
 if __name__ == "__main__":
     import uvicorn
-    from starlette.applications import Starlette
-    from starlette.routing import Route, Mount
-    from starlette.responses import HTMLResponse
-
-    async def landing(request):
-        return HTMLResponse(_LANDING_HTML)
 
     logger.info(f"Invoice Parser MCP server starting up (streamable-http on :{_PORT})")
-    mcp_asgi = mcp.streamable_http_app()
-    app = Starlette(routes=[
-        Route("/", landing),
-        Route("/health", health),
-        Route("/analytics", analytics_endpoint),
-        Route("/stats", stats_endpoint),
-        Route("/payments", payments),
-        Mount("/", app=mcp_asgi),
-    ])
+    app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=_PORT)
