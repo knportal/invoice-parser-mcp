@@ -2,6 +2,7 @@
 
 Parse invoices, receipts, and financial documents into structured JSON — from your AI agent.
 
+[![smithery badge](https://smithery.ai/badge/@knportal/invoice-parser-mcp)](https://smithery.ai/server/@knportal/invoice-parser-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen.svg)](https://modelcontextprotocol.io)
