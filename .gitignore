@@ -15,3 +15,8 @@ logs/
 *.p8
 .secrets/
 .railway-deploy-trigger
+
+# Local dev
+.wrangler/
+venv2/
+wrangler.toml
