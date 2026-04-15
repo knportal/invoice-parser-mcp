@@ -1,0 +1,101 @@
+name: invoice-parser-mcp
+displayName: Invoice Parser MCP
+description: Parse invoices, receipts, and financial documents into structured JSON from your AI agent. No templates, no OCR configuration — Claude Vision reads the document and returns clean JSON.
+version: "1.0.0"
+license: MIT
+author: Plenitudo AI
+homepage: https://invoice-parser.plenitudo.ai
+repository: https://github.com/knportal/invoice-parser-mcp
+support: https://github.com/knportal/invoice-parser-mcp/issues
+tags:
+  - finance
+  - invoices
+  - receipts
+  - document-parsing
+  - accounting
+keywords:
+  - invoice-parsing
+  - receipt-processing
+  - financial-documents
+  - ocr
+  - pdf-parsing
+  - accounting-automation
+  - structured-data
+  - claude-vision
+server:
+  type: http
+  url: https://invoice-parser.plenitudo.ai/mcp
+pricing:
+  free:
+    description: Pay-per-call via x402 protocol (USDC on Base)
+    price: $0.01–$0.10/call
+tools:
+  - name: parse_invoice
+    description: Parse a PDF invoice or image into structured JSON with vendor info, line items, totals, and due date.
+    inputSchema:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: Absolute path to the invoice file (PDF or image).
+        payment_proof:
+          type: string
+          description: x402 payment proof (USDC transaction hash on Base network).
+      required:
+        - file_path
+
+  - name: parse_receipt
+    description: Parse a retail receipt into structured JSON with merchant, items, tax, and payment method.
+    inputSchema:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: Absolute path to the receipt file (PDF or image).
+        payment_proof:
+          type: string
+          description: x402 payment proof (USDC transaction hash on Base network).
+      required:
+        - file_path
+
+  - name: extract_line_items
+    description: Extract just the itemized line items from an invoice or receipt. Faster and cheaper than full parse.
+    inputSchema:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: Absolute path to the document file.
+        payment_proof:
+          type: string
+          description: x402 payment proof.
+      required:
+        - file_path
+
+  - name: extract_totals
+    description: Extract just the subtotal, tax, total, and due date from a document.
+    inputSchema:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: Absolute path to the document file.
+        payment_proof:
+          type: string
+          description: x402 payment proof.
+      required:
+        - file_path
+
+  - name: validate_invoice
+    description: Validate that invoice line items add up correctly to the stated total. Returns true/false with discrepancy details.
+    inputSchema:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: Absolute path to the invoice file.
+        payment_proof:
+          type: string
+          description: x402 payment proof.
+      required:
+        - file_path

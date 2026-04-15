@@ -6,7 +6,7 @@ Parse invoices, receipts, and financial documents into structured JSON — from 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen.svg)](https://modelcontextprotocol.io)
 
-**Listed on:** [Glama](https://glama.ai/mcp/servers/knportal/invoice-parser-mcp?ref=readme)
+**Listed on:** [Glama](https://glama.ai/mcp/servers/knportal/invoice-parser-mcp?ref=readme) · [Smithery](https://smithery.ai/server/knportal/invoice-parser-mcp?ref=readme) · [mcp.so](https://mcp.so/server/invoice-parser-mcp?ref=readme)
 
 Built for the [Model Context Protocol](https://modelcontextprotocol.io). Powered by Claude Vision.
 
