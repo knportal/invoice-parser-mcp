@@ -1,4 +1,46 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["knportal"]
+  "maintainers": ["knportal"],
+  "name": "Invoice Parser MCP",
+  "description": "Parse invoices, receipts, and financial documents into structured JSON from your AI agent. Powered by Claude Vision. No templates, no OCR configuration needed.",
+  "license": "MIT",
+  "categories": ["finance", "documents"],
+  "tools": [
+    {
+      "name": "parse_invoice",
+      "description": "Full invoice parsing — vendor, line items, totals, due date."
+    },
+    {
+      "name": "parse_receipt",
+      "description": "Retail receipt parsing — merchant, items, tax, payment method."
+    },
+    {
+      "name": "extract_line_items",
+      "description": "Extract just the itemized list from an invoice or receipt."
+    },
+    {
+      "name": "extract_totals",
+      "description": "Extract just subtotal, tax, total, and due date."
+    },
+    {
+      "name": "validate_invoice",
+      "description": "Math validation — checks that line items add up to the stated total."
+    },
+    {
+      "name": "export_to_csv",
+      "description": "Batch parse multiple files and export a summary CSV (max 20 files)."
+    }
+  ],
+  "env": [
+    {
+      "name": "ANTHROPIC_API_KEY",
+      "description": "Your Anthropic API key for Claude Vision. Required to run the server.",
+      "required": true
+    },
+    {
+      "name": "INVOICE_PARSER_API_KEY",
+      "description": "Your Invoice Parser API key for managed access. Get one at the service endpoint.",
+      "required": false
+    }
+  ]
 }
